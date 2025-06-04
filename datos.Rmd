@@ -1,0 +1,185 @@
+---
+title: "Recolección y preprocesamiento de los datos"
+author: "Beatriz Jiménez Guijarro"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(tidy = TRUE, tidy.opts = list(width.cutoff = 75))
+```
+
+```{r}
+#Librerías necesarias para ejecutar el script
+library(readr)
+library(sp)
+library(geodata)
+library(terra)
+```
+
+```{r}
+#Lectura de la base de datos de GBIF (documento .txt separado por tabulaciones)
+dataSpeciesES <- read_delim("C:/Users/Bea/Documents/MÁSTER/M0.209 TFM Bioinformática Estadística y Aprendizaje Automático/0000022-241106120511685/occurrence.txt", delim = "\t", col_names = TRUE)
+
+#Obtención de sus dimensiones para comprobar que se ha importado correctamente
+dim(dataSpeciesES)
+```
+
+```{r}
+#Primera limpieza de datos: eliminar todas las filas que no tengan datos de latitud y longitud (NA)
+dataSpeciesES_clean <- dataSpeciesES[!is.na(dataSpeciesES$decimalLatitude) & !is.na(dataSpeciesES$decimalLongitude), ]
+
+#Obtención de las nuevas dimensiones para comprobar que se ha limpiado correctamente
+dim(dataSpeciesES_clean)
+```
+
+```{r}
+#Segunda limpieza de datos: eliminar filas con coordenadas duplicadas (latitud y longitud)
+dataSpeciesES_clean_unique <- dataSpeciesES_clean[!duplicated(dataSpeciesES_clean[c("decimalLatitude", "decimalLongitude")]), ]
+
+#Obtención de las nuevas dimensiones para comprobar que se ha reducido correctamente
+dim(dataSpeciesES_clean_unique)
+```
+
+```{r}
+#Lectura de la base de datos de IUCN (documento .csv separado por comas)
+dataSpeciesES_IUCN <- read.csv("C:/Users/Bea/Documents/MÁSTER/M0.209 TFM Bioinformática Estadística y Aprendizaje Automático/redlist_species_data_a752ddc9-b266-4b7f-869d-8e7a46645433/assessments.csv", header = TRUE, fill = TRUE)
+
+#Obtención de sus dimensiones para comprobar que se ha importado correctamente
+dim(dataSpeciesES_IUCN)
+```
+
+```{r}
+#Filtrado y unión del dataset GBIF donde hay coincidencias de especies en el dataset IUCN
+dataSpeciesES_clean_unique_filtered <- merge(dataSpeciesES_clean_unique, dataSpeciesES_IUCN, by.x = "species", by.y = "scientificName")
+
+#Eliminación de filas con especies faltantes (si las hubiera)
+dataSpeciesES_clean_unique_filtered <-
+  dataSpeciesES_clean_unique_filtered[!is.na(dataSpeciesES_clean_unique_filtered$scientificName), ]
+
+#Obtención de las nuevas dimensiones para comprobar que se ha filtrado y unido correctamente
+dim(dataSpeciesES_clean_unique_filtered)
+```
+
+```{r}
+#Tercera limpieza de datos: eliminar filas, por cada especie, con coordenadas repetidas espacialmente en un radio de 1 km2
+
+#Definición de un umbral de 1 km en grados decimales. 1 grado de latitud representa aproximadamente 111 km, por lo tanto el umbral de 1 km en grados decimales se obtiene dividiendo 1 km/111 km
+km_to_deg <- 1 / 111
+
+#Definición de la función para eliminar duplicados espaciales
+clean_dup_by_species <- function(data, species_column, latitude, longitude, threshold=0.0) {
+  
+  #Eliminarción de filas con valores faltantes en latitud o longitud
+  data <- data[!is.na(data[,species_column]) & !is.na(data[,latitude]) & !is.na(data[,longitude]),]
+  
+  #Crearción de un dataframe vacío para almacenar los resultados
+  cleaned_data <- data.frame()
+  
+  #Obtención de la lista de especies únicas
+  species_list <- unique(data[, species_column])
+  
+  #Bucle sobre cada especie
+  for (species in species_list) {
+    
+    #Filtrado del dataframe por la especie actual
+    species_data <- data[data[, species_column] == species, ]
+  
+    #Creación de un objeto `SpatialPointsDataFrame` con los datos de longitud y latitud sobre cada       especie
+    dat_sp <- SpatialPointsDataFrame(species_data[,c(latitude, longitude)], species_data)
+  
+    #Uso de la función `remove.duplicates` para eliminar puntos dentro del umbral de distancia(1 km2)
+    dat_sp_clean <- remove.duplicates(dat_sp, zero = threshold)
+    
+    #Se agregan los datos limpios al dataframe final
+    cleaned_data <- rbind(cleaned_data, dat_sp_clean@data)
+  }
+  
+  #Se devuelven los datos con los duplicados eliminados
+  return(cleaned_data)
+}
+
+#Uso de la función para eliminar filas, por cada especie, con coordenadas repetidas espacialmente en un radio de 1 km2
+dataSpeciesES_clean_unique_filtered2 <- clean_dup_by_species(dataSpeciesES_clean_unique_filtered, species_column = "species", latitude = "decimalLatitude", longitude = "decimalLongitude", threshold = km_to_deg)
+
+#Verificación de las nuevas dimensiones para comprobar que se ha filtrado correctamente
+dim(dataSpeciesES_clean_unique_filtered2)
+```
+
+```{r}
+#Obtención de las columnas interesantes para el estudio
+dataSpeciesES_final <- dataSpeciesES_clean_unique_filtered2[, c("species", "scientificName", "decimalLatitude", "decimalLongitude", "year", "populationTrend", "systems", "redlistCategory", "iucnRedListCategory")]
+
+#Verificación de las nuevas dimensiones para comprobar que las columnas son las correctas
+dim(dataSpeciesES_final)
+```
+
+```{r}
+#Obtención de los datos sobre temperatura, precipitaciones y otras variables bioclimáticas de las bases de datos de WorldClim
+
+#Definir los puntos espaciales de las coordenadas de la base de datos (latitud y longitud) con la función `SpatialPoints` del paquete `sp`
+spatial_points <- SpatialPoints(dataSpeciesES_final[, c("decimalLongitude", "decimalLatitude")], 
+                        proj4string = CRS("+proj=longlat +datum=WGS84"))
+
+#Descarga de las variables bioclimáticas de WorldClim mediante la función `worldclim_global` del paquete `geodata`
+worldclim_bio <- worldclim_global(var = "bio", res = 2.5, version = "2.1", path = "C:/Users/Bea/Documents/MÁSTER/M0.209 TFM Bioinformática Estadística y Aprendizaje Automático")
+
+#Convertir los puntos espaciales a un objeto `SpatVector` del paquete `terra`
+spatial_points_terra <- vect(spatial_points)
+
+#Extracción de los valores de las variables bioclimáticas para cada coordenada de la base de datos
+worldclim_bio_values <- extract(worldclim_bio, spatial_points_terra)
+
+#Conversión de los datos extraídos a un DataFrame (sin la primera columna de índices)
+worldclim_bio_df <- as.data.frame(worldclim_bio_values)[, -1]
+
+#Renombramiento de las columnas con cada variable bioclimática de WorldClim
+colnames(worldclim_bio_df) <- c(
+  "BIO1_TemperaturaMediaAnual", 
+  "BIO2_RangoTempDiarioPromedio",
+  "BIO3_Isotermalidad", 
+  "BIO4_EstacionalidadTemp",
+  "BIO5_TempMaxMesMasCalido",
+  "BIO6_TempMinMesMasFrio",
+  "BIO7_RangoTempAnual",
+  "BIO8_TempMediaTrimestreHumedo",
+  "BIO9_TempMediaTrimestreSeco",
+  "BIO10_TempMediaTrimestreCalido",
+  "BIO11_TempMediaTrimestreFrio",
+  "BIO12_PrecipitacionAnual",
+  "BIO13_PrecipitacionMesMasHumedo",
+  "BIO14_PrecipitacionMesMasSeco",
+  "BIO15_EstacionalidadPrecipitacion",
+  "BIO16_PrecipitacionTrimestreHumedo",
+  "BIO17_PrecipitacionTrimestreSeco",
+  "BIO18_PrecipitacionTrimestreCalido",
+  "BIO19_PrecipitacionTrimestreFrio"
+)
+
+#Unión de los datos bioclimáticos de WorldClim con las coordenadas de la base de datos original
+dataSpeciesES_completo <- cbind(dataSpeciesES_final, worldclim_bio_df)
+
+#Obtención de las nuevas dimensiones para comprobar que se han añadido las columnas de WorldClim
+dim(dataSpeciesES_completo)
+```
+
+```{r}
+#Eliminar las filas con cualquier valor faltante en la base de datos (no aportan datos)
+dataSpeciesES_completo_final <- na.omit(dataSpeciesES_completo)
+
+#Verificación de las nuevas dimensiones para comprobar que se han eliminado las filas con valores faltantes
+dim(dataSpeciesES_completo_final)
+```
+
+```{r}
+#Exportar la base de datos final como .csv
+write.csv(dataSpeciesES_completo_final, file = "C:/Users/Bea/Documents/MÁSTER/M0.209 TFM Bioinformática Estadística y Aprendizaje Automático/dataSpeciesES_completo_final.csv", row.names = FALSE)
+
+#Exportar la base de datos final como .txt
+write.table(dataSpeciesES_completo_final, file = "C:/Users/Bea/Documents/MÁSTER/M0.209 TFM Bioinformática Estadística y Aprendizaje Automático/dataSpeciesES_completo_final.txt", sep = "\t", row.names = FALSE, col.names = TRUE)
+```
